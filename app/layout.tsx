@@ -2,9 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "CDM // A Profile Story",
-  description:
-    "An interactive visual-novel-style introduction to Christian Dave Mainit.",
+  title: "A Profile",
+  description: "A visual novel profile experience",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

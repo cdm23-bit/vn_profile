@@ -1,23 +1,26 @@
-import type { SceneChoice } from "@/data/visual-novel-script";
+import type { StoryChoice } from "@/data/visual-novel-script";
 
 export default function ChoiceMenu({
+  category,
   choices,
   onChoose,
 }: {
-  choices: SceneChoice[];
-  onChoose: (choice: SceneChoice) => void;
+  category: string;
+  choices: StoryChoice[];
+  onChoose: (choice: StoryChoice) => void;
 }) {
   return (
-    <nav className="choice-menu" aria-label="Story choices">
-      <span className="choice-heading">CHOOSE A PATH</span>
+    <nav className="choice-menu" aria-label={`${category.toLowerCase()} choices`}>
+      <span className="choice-heading">{category}</span>
       <div className="choice-list">
         {choices.map((choice, index) => (
           <button
             className="choice-button"
-            key={`${choice.nextScene}-${choice.label}`}
+            key={`${choice.next}-${choice.label}`}
             onClick={() => onChoose(choice)}
+            type="button"
           >
-            <span className="choice-number">{String(index + 1).padStart(2, "0")}</span>
+            <span className="choice-number">{index + 1}</span>
             <span>{choice.label}</span>
             <span className="choice-arrow" aria-hidden="true">↗</span>
           </button>

@@ -1,410 +1,174 @@
 "use client";
 
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  useSyncExternalStore,
-} from "react";
-import ChoiceMenu from "@/app/components/choice-menu";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CharacterPortrait from "@/app/components/character-portrait";
+import ChoiceMenu from "@/app/components/choice-menu";
 import DialogueBox from "@/app/components/dialogue-box";
 import EndingScreen from "@/app/components/ending-screen";
+import ProfileArchive from "@/app/components/profile-archive";
 import SceneBackground from "@/app/components/scene-background";
 import TitleScreen from "@/app/components/title-screen";
-import VNTools, {
-  type BacklogEntry,
-  type TextSpeed,
-  type ToolsPanel,
-} from "@/app/components/vn-tools";
 import {
   createVisualNovelScript,
-  type SceneChoice,
-  type SceneId,
+  resolveStoryRoute,
+  type CharacterExpression,
+  type StoryChoice,
+  type StoryNodeId,
+  type StoryNode,
+  type StoryProgress,
 } from "@/data/visual-novel-script";
 import type { ProfileData } from "@/lib/profile-data";
 
-const SCENE_ORDER: SceneId[] = [
-  "introduction",
-  "personal-information",
-  "skills",
-  "projects",
-  "contact",
-  "ending",
-];
+const TYPEWRITER_INTERVAL = 24;
 
-const SAVE_KEY = "cdm-profile-story-save";
-const SAVE_EVENT = "cdm-profile-story-save-updated";
-const STORAGE_UNAVAILABLE = "__storage_unavailable__";
-
-interface SavedProgress {
-  version: 1;
-  scene: SceneId;
-  dialogueIndex: number;
-  visibleCharacters: number;
-  backlog: BacklogEntry[];
-  seenLines: string[];
-}
-
-const TYPEWRITER_INTERVALS: Record<TextSpeed, number> = {
-  slow: 42,
-  normal: 22,
-  fast: 9,
+const EMPTY_PROGRESS: StoryProgress = {
+  flags: new Set(),
+  goodChoices: 0,
+  badChoices: 0,
+  solvedPuzzles: 0,
 };
 
-function subscribeToSave(onStoreChange: () => void) {
-  window.addEventListener("storage", onStoreChange);
-  window.addEventListener(SAVE_EVENT, onStoreChange);
-  return () => {
-    window.removeEventListener("storage", onStoreChange);
-    window.removeEventListener(SAVE_EVENT, onStoreChange);
-  };
-}
+type RenderableStoryNode = Exclude<StoryNode, { kind: "route" }>;
 
-function getSaveSnapshot() {
-  try {
-    return window.localStorage.getItem(SAVE_KEY);
-  } catch {
-    return STORAGE_UNAVAILABLE;
+function getRenderableNode(
+  nodeId: StoryNodeId,
+  progress: StoryProgress,
+  script: Record<StoryNodeId, StoryNode>,
+): RenderableStoryNode {
+  const node = script[resolveStoryRoute(nodeId, progress, script)];
+  if (node.kind === "route") {
+    throw new Error(`Story route "${nodeId}" did not resolve to a scene.`);
   }
-}
-
-function isSavedProgress(
-  value: unknown,
-  script: ReturnType<typeof createVisualNovelScript>,
-): value is SavedProgress {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const candidate = value as Record<string, unknown>;
-  if (
-    candidate.version !== 1 ||
-    !SCENE_ORDER.some((scene) => scene === candidate.scene) ||
-    !Number.isInteger(candidate.dialogueIndex) ||
-    !Number.isInteger(candidate.visibleCharacters) ||
-    !Array.isArray(candidate.backlog) ||
-    !Array.isArray(candidate.seenLines)
-  ) {
-    return false;
-  }
-
-  const backlogIsValid = candidate.backlog.every((entry: unknown) => {
-    if (typeof entry !== "object" || entry === null) {
-      return false;
-    }
-    const item = entry as Record<string, unknown>;
-    return typeof item.speaker === "string" && typeof item.text === "string";
-  });
-  const seenLinesAreValid = candidate.seenLines.every((key: unknown) =>
-    SCENE_ORDER.some((sceneId) => {
-      const prefix = `${sceneId}:`;
-      if (typeof key !== "string" || !key.startsWith(prefix)) {
-        return false;
-      }
-      const indexText = key.slice(prefix.length);
-      const index = Number(indexText);
-      return (
-        String(index) === indexText &&
-        Number.isInteger(index) &&
-        index >= 0 &&
-        index < script[sceneId].entries.length
-      );
-    }),
-  );
-  if (!backlogIsValid || !seenLinesAreValid) {
-    return false;
-  }
-
-  const scene = candidate.scene as SceneId;
-  const dialogueIndex = candidate.dialogueIndex as number;
-  const visibleCharacters = candidate.visibleCharacters as number;
-  const sceneEntries = script[scene].entries;
-
-  if (scene === "ending") {
-    return dialogueIndex === 0 && visibleCharacters === 0;
-  }
-
-  return (
-    dialogueIndex >= 0 &&
-    dialogueIndex < sceneEntries.length &&
-    visibleCharacters >= 0 &&
-    visibleCharacters <= sceneEntries[dialogueIndex].text.length
-  );
+  return node;
 }
 
 export default function VNGame({ profile }: { profile: ProfileData }) {
   const script = useMemo(() => createVisualNovelScript(profile), [profile]);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [currentScene, setCurrentScene] = useState<SceneId>("introduction");
-  const [dialogueIndex, setDialogueIndex] = useState(0);
+  const [nodeId, setNodeId] = useState<StoryNodeId>("opening");
+  const [progress, setProgress] = useState<StoryProgress>(EMPTY_PROGRESS);
   const [visibleCharacters, setVisibleCharacters] = useState(0);
   const [isTransitioning, setIsTransitioning] = useState(false);
-  const [backlog, setBacklog] = useState<BacklogEntry[]>([]);
-  const [panel, setPanel] = useState<ToolsPanel>(null);
-  const [autoAdvance, setAutoAdvance] = useState(false);
-  const [skipRead, setSkipRead] = useState(false);
-  const [textSpeed, setTextSpeed] = useState<TextSpeed>("normal");
-  const [seenLines, setSeenLines] = useState<Set<string>>(() => new Set());
-  const [saveStatus, setSaveStatus] = useState<string | null>(null);
+  const [backlog, setBacklog] = useState<{ speaker: string; text: string }[]>([]);
+  const [isLogOpen, setIsLogOpen] = useState(false);
   const transitionLock = useRef(false);
-  const savedJson = useSyncExternalStore(
-    subscribeToSave,
-    getSaveSnapshot,
-    () => null,
-  );
-  const { savedProgress, storageMessage } = useMemo(() => {
-    if (savedJson === STORAGE_UNAVAILABLE) {
-      return {
-        savedProgress: null,
-        storageMessage: "Local saves are unavailable in this browser.",
-      };
-    }
 
-    if (!savedJson) {
-      return { savedProgress: null, storageMessage: null };
-    }
-
-    try {
-      const parsedProgress: unknown = JSON.parse(savedJson);
-      if (isSavedProgress(parsedProgress, script)) {
-        return { savedProgress: parsedProgress, storageMessage: null };
-      }
-
-      return {
-        savedProgress: null,
-        storageMessage: "The local save slot is invalid.",
-      };
-    } catch {
-      return {
-        savedProgress: null,
-        storageMessage: "The local save slot could not be read.",
-      };
-    }
-  }, [savedJson, script]);
-
-  const scene = script[currentScene];
-  const currentEntry = scene.entries[dialogueIndex];
-  const isEnding = currentScene === "ending";
-  const isTyping =
-    isPlaying && !isEnding && visibleCharacters < currentEntry.text.length;
-  const sceneFinished =
-    !isEnding &&
-    dialogueIndex === scene.entries.length - 1 &&
-    !isTyping;
-  const visibleText = isEnding
-    ? ""
-    : currentEntry.text.slice(0, visibleCharacters);
-  const lineKey = `${currentScene}:${dialogueIndex}`;
-
+  const node = getRenderableNode(nodeId, progress, script);
+  const isTextNode = node.kind === "dialogue" || node.kind === "choice";
+  const displayedText =
+    node.kind === "dialogue" ? node.text : node.kind === "choice" ? node.prompt : "";
+  const isTyping = isPlaying && isTextNode && visibleCharacters < displayedText.length;
+  const currentExpression: CharacterExpression =
+    node.kind === "dialogue" || node.kind === "choice"
+      ? node.expression ?? "neutral"
+      : "serious";
   useEffect(() => {
-    if (!isPlaying || isTransitioning || isEnding) {
+    if (!isPlaying || !isTextNode || isTransitioning) {
       return;
     }
 
     const timer = window.setInterval(() => {
-      setVisibleCharacters((count) =>
-        Math.min(count + 1, currentEntry.text.length),
-      );
-    }, TYPEWRITER_INTERVALS[textSpeed]);
+      setVisibleCharacters((count) => Math.min(count + 1, displayedText.length));
+    }, TYPEWRITER_INTERVAL);
 
     return () => window.clearInterval(timer);
-  }, [currentEntry, isEnding, isPlaying, isTransitioning, textSpeed]);
+  }, [displayedText, isPlaying, isTextNode, isTransitioning]);
 
-  const moveToScene = useCallback((nextScene: SceneId) => {
-    if (transitionLock.current) {
-      return;
-    }
-
-    transitionLock.current = true;
-    setIsTransitioning(true);
-    window.setTimeout(() => {
-      setCurrentScene(nextScene);
-      setDialogueIndex(0);
-      setVisibleCharacters(0);
-      window.setTimeout(() => {
-        transitionLock.current = false;
-        setIsTransitioning(false);
-      }, 140);
-    }, 180);
-  }, []);
-
-  const startStory = useCallback(() => {
-    setCurrentScene("introduction");
-    setDialogueIndex(0);
-    setVisibleCharacters(0);
-    setBacklog([]);
-    setPanel(null);
-    setIsPlaying(true);
-  }, []);
-
-  const addCurrentLineToBacklog = useCallback(() => {
-    setBacklog((entries) => [
-      ...entries,
-      { speaker: currentEntry.speaker, text: currentEntry.text },
-    ]);
-  }, [currentEntry]);
-
-  const handleContinue = useCallback(() => {
-    if (!isPlaying || isTransitioning || isEnding) {
-      return;
-    }
-
-    if (isTyping) {
-      setVisibleCharacters(currentEntry.text.length);
-      return;
-    }
-
-    if (currentEntry.choices) {
-      return;
-    }
-
-    if (dialogueIndex < scene.entries.length - 1) {
-      setSeenLines((seen) => new Set(seen).add(lineKey));
-      addCurrentLineToBacklog();
-      const nextIndex = dialogueIndex + 1;
-      const nextEntry = scene.entries[nextIndex];
-      const nextLineKey = `${currentScene}:${nextIndex}`;
-      if (nextEntry.choices) {
-        setSkipRead(false);
-      } else if (skipRead && seenLines.has(nextLineKey)) {
-        setVisibleCharacters(nextEntry.text.length);
-      } else if (skipRead) {
-        setSkipRead(false);
-      }
-      setDialogueIndex(nextIndex);
-    }
-  }, [
-    addCurrentLineToBacklog,
-    currentEntry,
-    currentScene,
-    dialogueIndex,
-    isEnding,
-    isPlaying,
-    isTransitioning,
-    isTyping,
-    lineKey,
-    seenLines,
-    scene.entries,
-    skipRead,
-  ]);
-
-  const handleChoice = useCallback(
-    (choice: SceneChoice) => {
-      setSeenLines((seen) => new Set(seen).add(lineKey));
-      addCurrentLineToBacklog();
-      setPanel(null);
-      setSkipRead(false);
-      moveToScene(choice.nextScene);
-    },
-    [addCurrentLineToBacklog, lineKey, moveToScene],
-  );
-
-  const handleQuickSave = useCallback(() => {
-    const progress: SavedProgress = {
-      version: 1,
-      scene: currentScene,
-      dialogueIndex: isEnding ? 0 : dialogueIndex,
-      visibleCharacters: isEnding ? 0 : visibleCharacters,
-      backlog,
-      seenLines: Array.from(seenLines),
-    };
-
-    try {
-      window.localStorage.setItem(SAVE_KEY, JSON.stringify(progress));
-      window.dispatchEvent(new Event(SAVE_EVENT));
-      setSaveStatus("PROGRESS SAVED IN THIS BROWSER.");
-    } catch {
-      setSaveStatus("SAVE FAILED. BROWSER STORAGE IS UNAVAILABLE.");
-    }
-  }, [backlog, currentScene, dialogueIndex, isEnding, seenLines, visibleCharacters]);
-
-  const resumeStory = useCallback(() => {
-    if (!savedProgress) {
-      return;
-    }
-
-    setCurrentScene(savedProgress.scene);
-    setDialogueIndex(savedProgress.dialogueIndex);
-    setVisibleCharacters(savedProgress.visibleCharacters);
-    setBacklog(savedProgress.backlog);
-    setSeenLines(new Set(savedProgress.seenLines));
-    setPanel(null);
-    setIsPlaying(true);
-  }, [savedProgress]);
-
-  useEffect(() => {
-    if (
-      !isPlaying ||
-      !autoAdvance ||
-      panel !== null ||
-      isTyping ||
-      isTransitioning ||
-      isEnding ||
-      currentEntry.choices
-    ) {
-      return;
-    }
-
-    const timer = window.setTimeout(handleContinue, 1400);
-    return () => window.clearTimeout(timer);
-  }, [
-    autoAdvance,
-    currentEntry,
-    handleContinue,
-    isEnding,
-    isPlaying,
-    isTransitioning,
-    isTyping,
-    panel,
-  ]);
-
-  useEffect(() => {
-    if (
-      !skipRead ||
-      !isPlaying ||
-      isEnding ||
-      isTransitioning ||
-      panel !== null ||
-      !seenLines.has(lineKey) ||
-      currentEntry.choices
-    ) {
-      return;
-    }
-
-    if (isTyping) {
-      return;
-    }
-
-    const timer = window.setTimeout(handleContinue, 90);
-    return () => window.clearTimeout(timer);
-  }, [
-    currentEntry,
-    handleContinue,
-    isEnding,
-    isPlaying,
-    isTransitioning,
-    isTyping,
-    lineKey,
-    panel,
-    seenLines,
-    skipRead,
-  ]);
-
-  useEffect(() => {
-    if (!isPlaying) {
-      return;
-    }
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.repeat) {
+  const moveTo = useCallback(
+    (nextId: StoryNodeId, nextProgress = progress) => {
+      if (transitionLock.current) {
         return;
       }
 
-      if (event.key === "Escape") {
-        setPanel((currentPanel) => currentPanel === null ? "settings" : null);
+      const resolvedId = resolveStoryRoute(nextId, nextProgress, script);
+      transitionLock.current = true;
+      setIsTransitioning(true);
+      window.setTimeout(() => {
+        setNodeId(resolvedId);
+        setVisibleCharacters(0);
+        window.setTimeout(() => {
+          transitionLock.current = false;
+          setIsTransitioning(false);
+        }, 160);
+      }, 180);
+    },
+    [progress, script],
+  );
+
+  const addCurrentLineToBacklog = useCallback(() => {
+    if (node.kind !== "dialogue" && node.kind !== "choice") {
+      return;
+    }
+
+    setBacklog((entries) => [
+      ...entries,
+      {
+        speaker: node.speaker,
+        text: node.kind === "dialogue" ? node.text : node.prompt,
+      },
+    ]);
+  }, [node]);
+
+  const continueStory = useCallback(() => {
+    if (!isPlaying || isTransitioning || !isTextNode) {
+      return;
+    }
+
+    if (isTyping) {
+      setVisibleCharacters(displayedText.length);
+      return;
+    }
+
+    if (node.kind === "dialogue") {
+      addCurrentLineToBacklog();
+      moveTo(node.next);
+    }
+  }, [
+    addCurrentLineToBacklog,
+    displayedText,
+    isPlaying,
+    isTextNode,
+    isTransitioning,
+    isTyping,
+    moveTo,
+    node,
+  ]);
+
+  const choose = useCallback(
+    (choice: StoryChoice) => {
+      if (node.kind !== "choice" || isTransitioning) {
+        return;
+      }
+
+      addCurrentLineToBacklog();
+      const nextFlags = new Set(progress.flags);
+      choice.addsFlags?.forEach((flag) => nextFlags.add(flag));
+      const nextProgress: StoryProgress = {
+        flags: nextFlags,
+        goodChoices: progress.goodChoices + (choice.impact === "good" ? 1 : 0),
+        badChoices: progress.badChoices + (choice.impact === "bad" ? 1 : 0),
+        solvedPuzzles: progress.solvedPuzzles + (choice.correct ? 1 : 0),
+      };
+      setProgress(nextProgress);
+      moveTo(choice.next, nextProgress);
+    },
+    [addCurrentLineToBacklog, isTransitioning, moveTo, node, progress],
+  );
+
+  const startStory = useCallback(() => {
+    transitionLock.current = false;
+    setNodeId("opening");
+    setProgress(EMPTY_PROGRESS);
+    setVisibleCharacters(0);
+    setBacklog([]);
+    setIsLogOpen(false);
+    setIsTransitioning(false);
+    setIsPlaying(true);
+  }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.repeat) {
         return;
       }
 
@@ -416,155 +180,148 @@ export default function VNGame({ profile }: { profile: ProfileData }) {
         return;
       }
 
+      if (!isPlaying) {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          startStory();
+        }
+        return;
+      }
+
+      if (node.kind === "choice" && /^[1-4]$/.test(event.key)) {
+        const choiceIndex = Number(event.key) - 1;
+        const choice = node.choices[choiceIndex];
+        if (choice) {
+          event.preventDefault();
+          choose(choice);
+        }
+        return;
+      }
+
       if (event.key === "Backspace") {
         event.preventDefault();
-        setPanel((currentPanel) => currentPanel === "backlog" ? null : "backlog");
+        setIsLogOpen((open) => !open);
         return;
       }
 
-      if (event.key !== "Enter" && event.key !== " ") {
-        return;
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        continueStory();
       }
-
-      event.preventDefault();
-      handleContinue();
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [handleContinue, isPlaying]);
-
-  const restartStory = () => {
-    setCurrentScene("introduction");
-    setDialogueIndex(0);
-    setVisibleCharacters(0);
-    setBacklog([]);
-    setPanel(null);
-    setSkipRead(false);
-    setIsPlaying(true);
-  };
-
-  const toggleSkipRead = () => {
-    if (skipRead) {
-      setSkipRead(false);
-      return;
-    }
-
-    if (isEnding || currentEntry.choices || !seenLines.has(lineKey)) {
-      return;
-    }
-
-    if (isTyping) {
-      setVisibleCharacters(currentEntry.text.length);
-    }
-    setSkipRead(true);
-  };
+  }, [choose, continueStory, isPlaying, node, startStory]);
 
   if (!isPlaying) {
+    return <TitleScreen onStart={startStory} />;
+  }
+
+  if (node.kind === "ending") {
     return (
-      <TitleScreen
-        profile={profile}
-        onStart={startStory}
-        onResume={resumeStory}
-        hasSave={savedProgress !== null}
-        storageMessage={storageMessage}
+      <EndingScreen
+        ending={node.ending}
+        onRestart={startStory}
+        onTitle={() => setIsPlaying(false)}
       />
     );
   }
 
-  const sceneNumber = SCENE_ORDER.indexOf(currentScene) + 1;
-
   return (
     <main className="vn-shell">
-      <div
-        className={`game-frame${isTransitioning ? " is-transitioning" : ""}`}
-        data-scene={currentScene}
-      >
+      <div className={`game-frame${isTransitioning ? " is-transitioning" : ""}`}>
         <header className="game-header">
           <div className="game-brand">
-            <span className="brand-mark"><i aria-hidden="true" /> CDM / ARCHIVE</span>
+            <span className="brand-mark"><i aria-hidden="true" /> AFTER THE LAST BELL</span>
             <span className="brand-divider" aria-hidden="true" />
-            <span className="game-file-label">A PROFILE STORY</span>
+            <span className="game-file-label">A SHORT CAMPUS STORY</span>
           </div>
-          <div className="game-status">
-            <span className="status-light" aria-hidden="true" />
-            <span>LOCAL STORY FILE</span>
-            <span className="status-divider" aria-hidden="true">/</span>
-            <span>{String(sceneNumber).padStart(2, "0")} : {String(SCENE_ORDER.length).padStart(2, "0")}</span>
+          <div className="game-header-actions">
+            <button
+              className="restart-button"
+              type="button"
+              aria-expanded={isLogOpen}
+              onClick={() => setIsLogOpen((open) => !open)}
+            >
+              LOG <span aria-hidden="true">↗</span>
+            </button>
+            <button className="restart-button" type="button" onClick={startStory}>
+              RESTART <span aria-hidden="true">↻</span>
+            </button>
           </div>
         </header>
 
-        <VNTools
-          panel={panel}
-          onPanelChange={setPanel}
-          backlog={backlog}
-          autoAdvance={autoAdvance}
-          onToggleAuto={() => setAutoAdvance((enabled) => !enabled)}
-          skipRead={skipRead}
-          onToggleSkip={toggleSkipRead}
-          textSpeed={textSpeed}
-          onTextSpeedChange={setTextSpeed}
-          onQuickSave={handleQuickSave}
-          saveStatus={saveStatus}
-          progress={(sceneNumber / SCENE_ORDER.length) * 100}
-        />
+        <section
+          className={`scene-stage scene-stage--${node.location}`}
+          aria-label={`${node.location.replace("-", " ")} scene`}
+        >
+          <SceneBackground location={node.location} />
+          <div className="scene-location">
+            <span className="scene-location-marker" aria-hidden="true" />
+            {node.location.replace("-", " ").toUpperCase()}
+          </div>
+          <div className="scene-coordinate" aria-hidden="true">
+            CAMPUS<br />LATE AFTERNOON
+          </div>
+          <CharacterPortrait
+            name="The girl"
+            active={node.kind !== "dialogue" || node.speaker === "The girl"}
+            expression={currentExpression}
+          />
+        </section>
 
-        {isEnding ? (
-          <EndingScreen
+        {node.kind === "archive" ? (
+          <ProfileArchive
             profile={profile}
-            onRestart={restartStory}
-            onTitle={() => setIsPlaying(false)}
+            secret={node.ending === "secret"}
+            onContinue={() => moveTo(node.next)}
           />
         ) : (
-          <>
-            <section className="scene-stage" aria-label={`${scene.title} scene`}>
-              <SceneBackground scene={currentScene} />
-              <div className="scene-location">
-                <span className="scene-location-marker" aria-hidden="true" />
-                {scene.setting}
-              </div>
-              <div className="scene-coordinate" aria-hidden="true">
-                SCENE {String(sceneNumber).padStart(2, "0")}<br />
-                PROFILE / {profile.id.toUpperCase()}
-              </div>
-              <div className="scene-bottom-mark" aria-hidden="true">
-                <span />
-                SIGNAL STABLE
-              </div>
-              <CharacterPortrait
-                name={profile.fullName}
-                active={currentEntry.speaker === profile.fullName}
+          <div
+            className={`story-controls${node.kind === "choice" && !isTyping ? " has-choices" : ""}`}
+          >
+            <DialogueBox
+              speaker={node.speaker}
+              text={displayedText.slice(0, visibleCharacters)}
+              isTyping={isTyping}
+              onContinue={continueStory}
+            />
+            {node.kind === "choice" && !isTyping && (
+              <ChoiceMenu
+                category={node.category}
+                choices={node.choices}
+                onChoose={choose}
               />
-            </section>
+            )}
+          </div>
+        )}
 
-            <div
-              className={`story-controls${!isTyping && currentEntry.choices ? " has-choices" : ""}`}
-            >
-              <DialogueBox
-                entry={currentEntry}
-                scene={scene}
-                visibleText={visibleText}
-                isTyping={isTyping}
-                sceneFinished={sceneFinished}
-                onContinue={handleContinue}
-              />
-
-              {!isTyping && currentEntry.choices && (
-                <ChoiceMenu choices={currentEntry.choices} onChoose={handleChoice} />
+        {isLogOpen && (
+          <aside className="story-log" aria-label="Dialogue log">
+            <div className="story-log-heading">
+              <strong>RECENT DIALOGUE</strong>
+              <button type="button" onClick={() => setIsLogOpen(false)}>CLOSE ×</button>
+            </div>
+            <div className="story-log-list">
+              {backlog.length === 0 ? (
+                <p>Lines you have read will appear here.</p>
+              ) : (
+                backlog.map((entry, index) => (
+                  <article key={`${index}-${entry.speaker}`}>
+                    <span>{entry.speaker}</span>
+                    <p>{entry.text}</p>
+                  </article>
+                ))
               )}
             </div>
-          </>
+          </aside>
         )}
 
         <footer className="game-footer">
-          <span>PROFILE DATABASE <i aria-hidden="true">/</i> ACCESS LEVEL 01</span>
-          <span>CHRISTIAN DAVE MAINIT</span>
+          <span>ENTER / SPACE TO CONTINUE <i aria-hidden="true">·</i> 1-4 TO CHOOSE <i aria-hidden="true">·</i> BACKSPACE LOG</span>
+          <span>NO TIMER. TAKE YOUR TIME.</span>
         </footer>
-        {storageMessage && (
-          <p className="storage-notice" role="status">
-            {storageMessage}
-          </p>
-        )}
         <div className="transition-shutter" aria-hidden="true" />
       </div>
     </main>
