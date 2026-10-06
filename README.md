@@ -34,6 +34,9 @@ The story is a client-side React experience on the existing Next.js App Router
 and TypeScript foundation. Profile and story content are bundled with the app;
 no database, credentials, or audio assets are required.
 
+Each topic scene begins with a question from “You”; edit the dialogue and
+responses in `data/visual-novel-script.ts`.
+
 ## Checks
 
 ```sh
