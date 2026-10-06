@@ -16,6 +16,11 @@ Use the on-screen Continue button, click the dialogue, or press Enter/Space to
 advance. When a line is still typing, the first input reveals it; the next
 advances. Topic choices appear at the end of a scene.
 
+The in-game command bar adds a dialogue log (also available with Backspace),
+automatic advance, read-line skip, and slow/normal/fast text speed settings.
+Open Settings for a quick save; saved progress is stored in this browser and
+can be resumed from the title screen. Automatic advance pauses at choices.
+
 ## Edit the profile and story
 
 - `data/profile.json` holds the profile details.

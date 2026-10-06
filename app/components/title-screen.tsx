@@ -3,9 +3,15 @@ import type { ProfileData } from "@/lib/profile-data";
 export default function TitleScreen({
   profile,
   onStart,
+  onResume,
+  hasSave,
+  storageMessage,
 }: {
   profile: ProfileData;
   onStart: () => void;
+  onResume: () => void;
+  hasSave: boolean;
+  storageMessage: string | null;
 }) {
   return (
     <main className="title-screen">
@@ -34,11 +40,21 @@ export default function TitleScreen({
           <br />
           Choose a path. Take it at your own pace.
         </p>
-        <button className="start-button" type="button" onClick={onStart}>
-          <span className="start-button-index">▶</span>
-          <span>BEGIN STORY</span>
-          <span className="start-button-arrow" aria-hidden="true">→</span>
-        </button>
+        <div className="title-actions">
+          <button className="start-button" type="button" onClick={onStart}>
+            <span className="start-button-index">▶</span>
+            <span>BEGIN STORY</span>
+            <span className="start-button-arrow" aria-hidden="true">→</span>
+          </button>
+          {hasSave && (
+            <button className="resume-button" type="button" onClick={onResume}>
+              RESUME STORY <span aria-hidden="true">↗</span>
+            </button>
+          )}
+        </div>
+        {storageMessage && (
+          <p className="title-storage-notice" role="status">{storageMessage}</p>
+        )}
       </div>
 
       <div className="title-bottomline">
